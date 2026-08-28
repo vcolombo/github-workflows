@@ -1,0 +1,46 @@
+name: Semgrep CE
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: semgrep-ce
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Download byte-pinned Semgrep rules
+        env:
+          RULESET_URL: https://semgrep.dev/c/p/default
+          RULESET_SHA256: cfa8bb1e6cfcd2b02f2bbef70d3b155858551834b72f79a7f70de42fc9118591
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          with urllib.request.urlopen(os.environ["RULESET_URL"], timeout=60) as response:
+              rules = response.read(10_000_001)
+          if len(rules) > 10_000_000:
+              raise SystemExit("Semgrep ruleset exceeds 10 MB safety limit")
+          actual = hashlib.sha256(rules).hexdigest()
+          expected = os.environ["RULESET_SHA256"]
+          if actual != expected:
+              raise SystemExit(f"Semgrep ruleset hash mismatch: {actual}")
+          Path("/tmp/semgrep-default.yml").write_bytes(rules)
+          PY
+      - name: Scan with Semgrep Community Edition
+        run: semgrep scan --config /tmp/semgrep-default.yml --metrics=off

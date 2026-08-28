@@ -10,8 +10,10 @@ Reusable, security-pinned GitHub Actions workflows for `vcolombo` public reposit
 - pins `actions/checkout` to a full commit SHA;
 - requires only `contents: read`;
 - uses no secrets or paid services;
-- downloads the `p/default` ruleset with an expected SHA-256, failing closed on upstream drift;
-- keeps Semgrep metrics disabled;
+- checks out Semgrep community rules at an immutable commit SHA;
+- keeps Semgrep metrics and version checks disabled;
+- prevents repository-controlled ignore files from suppressing tracked findings;
+- prevents checkout credentials from persisting into scan steps;
 - reports findings without failing the pull request.
 
 Callers must pin this repository to a full commit SHA:

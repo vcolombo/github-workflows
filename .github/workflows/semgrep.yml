@@ -21,26 +21,43 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Download byte-pinned Semgrep rules
-        env:
-          RULESET_URL: https://semgrep.dev/c/p/default
-          RULESET_SHA256: cfa8bb1e6cfcd2b02f2bbef70d3b155858551834b72f79a7f70de42fc9118591
-        run: |
-          python3 - <<'PY'
-          import hashlib
-          import os
-          import urllib.request
-          from pathlib import Path
-
-          with urllib.request.urlopen(os.environ["RULESET_URL"], timeout=60) as response:
-              rules = response.read(10_000_001)
-          if len(rules) > 10_000_000:
-              raise SystemExit("Semgrep ruleset exceeds 10 MB safety limit")
-          actual = hashlib.sha256(rules).hexdigest()
-          expected = os.environ["RULESET_SHA256"]
-          if actual != expected:
-              raise SystemExit(f"Semgrep ruleset hash mismatch: {actual}")
-          Path("/tmp/semgrep-default.yml").write_bytes(rules)
-          PY
+        with:
+          persist-credentials: false
+      - name: Check out pinned Semgrep community rules
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: semgrep/semgrep-rules
+          ref: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
+          path: .semgrep-rules
+          persist-credentials: false
+          sparse-checkout: |
+            bash
+            dockerfile
+            go
+            html
+            javascript
+            json
+            python
+            ruby
+            rust
+            terraform
+            typescript
+            yaml
       - name: Scan with Semgrep Community Edition
-        run: semgrep scan --config /tmp/semgrep-default.yml --metrics=off
+        run: |
+          semgrep scan --metrics=off --disable-version-check \
+            --no-git-ignore \
+            --x-ignore-semgrepignore-files \
+            --exclude .semgrep-rules \
+            --config .semgrep-rules/bash \
+            --config .semgrep-rules/dockerfile \
+            --config .semgrep-rules/go \
+            --config .semgrep-rules/html \
+            --config .semgrep-rules/javascript \
+            --config .semgrep-rules/json \
+            --config .semgrep-rules/python \
+            --config .semgrep-rules/ruby \
+            --config .semgrep-rules/rust \
+            --config .semgrep-rules/terraform \
+            --config .semgrep-rules/typescript \
+            --config .semgrep-rules/yaml

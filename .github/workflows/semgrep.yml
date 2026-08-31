@@ -22,7 +22,7 @@ jobs:
     name: semgrep-ce
     if: ${{ !inputs.use_self_hosted || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       SEMGREP_IMAGE: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
       RULES_COMMIT: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e

@@ -41,14 +41,16 @@ jobs:
           persist-credentials: false
       - name: Fetch pinned Semgrep community rules outside the workspace
         run: |
+          RULES_DIR=$(mktemp -d "$RUNNER_TEMP/semgrep-rules.XXXXXX")
+          echo "RULES_DIR=$RULES_DIR" >> "$GITHUB_ENV"
           git clone --filter=blob:none --no-checkout --depth 1 \
-            https://github.com/semgrep/semgrep-rules.git "$RUNNER_TEMP/semgrep-rules"
-          git -C "$RUNNER_TEMP/semgrep-rules" sparse-checkout init --cone
-          git -C "$RUNNER_TEMP/semgrep-rules" sparse-checkout set \
+            https://github.com/semgrep/semgrep-rules.git "$RULES_DIR"
+          git -C "$RULES_DIR" sparse-checkout init --cone
+          git -C "$RULES_DIR" sparse-checkout set \
             bash dockerfile go html javascript json python ruby rust terraform typescript yaml
-          git -C "$RUNNER_TEMP/semgrep-rules" fetch --depth 1 origin "$RULES_COMMIT"
-          git -C "$RUNNER_TEMP/semgrep-rules" checkout --detach "$RULES_COMMIT"
-          test "$(git -C "$RUNNER_TEMP/semgrep-rules" rev-parse HEAD)" = "$RULES_COMMIT"
+          git -C "$RULES_DIR" fetch --depth 1 origin "$RULES_COMMIT"
+          git -C "$RULES_DIR" checkout --detach "$RULES_COMMIT"
+          test "$(git -C "$RULES_DIR" rev-parse HEAD)" = "$RULES_COMMIT"
       - name: Scan with Semgrep Community Edition
         run: |
           docker run --rm --network none \
@@ -57,7 +59,7 @@ jobs:
             --env HOME=/tmp \
             --env PYTHONDONTWRITEBYTECODE=1 \
             --volume "$GITHUB_WORKSPACE:/src:ro" \
-            --volume "$RUNNER_TEMP/semgrep-rules:/rules:ro" \
+            --volume "$RULES_DIR:/rules:ro" \
             --workdir /src \
             "$SEMGREP_IMAGE" \
             scan --metrics=off --disable-version-check \

@@ -27,13 +27,14 @@ jobs:
       SEMGREP_IMAGE: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
       RULES_COMMIT: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
     steps:
-      - name: Remove legacy scanner-owned workspace directory
+      - name: Repair legacy scanner-owned workspace permissions
         if: ${{ inputs.use_self_hosted }}
         run: |
-          docker run --rm --entrypoint python3 \
+          docker run --rm --entrypoint chown \
             -v "$GITHUB_WORKSPACE:/workspace" \
-            "$SEMGREP_IMAGE" -c \
-            'from pathlib import Path; import shutil; root=Path("/workspace").resolve(); path=root/".semgrep-rules"; assert path.parent == root; shutil.rmtree(path) if path.exists() else None'
+            "$SEMGREP_IMAGE" -hR "$(id -u):$(id -g)" /workspace
+          unexpected_owner=$(find "$GITHUB_WORKSPACE" ! -uid "$(id -u)" -print -quit)
+          test -z "$unexpected_owner"
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:

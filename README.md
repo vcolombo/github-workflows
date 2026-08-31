@@ -34,7 +34,7 @@ jobs:
       use_self_hosted: true
 ```
 
-Never enable this input from public or fork caller repositories, or on a runner shared with trusted workloads.
+Self-hosted mode skips fork pull requests. Use it only where every collaborator with write access is trusted, and never on a runner shared with unrelated trusted workloads.
 
 ## Updating
 

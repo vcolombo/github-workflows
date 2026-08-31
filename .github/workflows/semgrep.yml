@@ -2,6 +2,12 @@ name: Semgrep CE
 
 on:
   workflow_call:
+    inputs:
+      use_self_hosted:
+        description: Use a repository-scoped Linux x64 self-hosted runner
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -14,7 +20,7 @@ concurrency:
 jobs:
   semgrep:
     name: semgrep-ce
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     container:
       image: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c

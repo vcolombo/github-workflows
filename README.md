@@ -24,6 +24,18 @@ jobs:
     uses: vcolombo/github-workflows/.github/workflows/semgrep.yml@<full-commit-sha>
 ```
 
+Private repositories can avoid GitHub-hosted runner charges by selecting an existing **repository-scoped Linux x64** self-hosted runner:
+
+```yaml
+jobs:
+  semgrep:
+    uses: vcolombo/github-workflows/.github/workflows/semgrep.yml@<full-commit-sha>
+    with:
+      use_self_hosted: true
+```
+
+Never enable this input from public or fork caller repositories, or on a runner shared with trusted workloads.
+
 ## Updating
 
 Update and verify this repository first, then open caller pull requests that replace the old workflow SHA with the new one. Never reference a branch or movable tag.

@@ -23,48 +23,54 @@ jobs:
     if: ${{ !inputs.use_self_hosted || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
-    container:
-      image: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
+    env:
+      SEMGREP_IMAGE: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
+      RULES_COMMIT: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
     steps:
+      - name: Remove legacy scanner-owned workspace directory
+        if: ${{ inputs.use_self_hosted }}
+        run: |
+          docker run --rm --entrypoint python3 \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            "$SEMGREP_IMAGE" -c \
+            'from pathlib import Path; import shutil; root=Path("/workspace").resolve(); path=root/".semgrep-rules"; assert path.parent == root; shutil.rmtree(path) if path.exists() else None'
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Check out pinned Semgrep community rules
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          repository: semgrep/semgrep-rules
-          ref: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
-          path: .semgrep-rules
-          persist-credentials: false
-          sparse-checkout: |
-            bash
-            dockerfile
-            go
-            html
-            javascript
-            json
-            python
-            ruby
-            rust
-            terraform
-            typescript
-            yaml
+      - name: Fetch pinned Semgrep community rules outside the workspace
+        run: |
+          git clone --filter=blob:none --no-checkout --depth 1 \
+            https://github.com/semgrep/semgrep-rules.git "$RUNNER_TEMP/semgrep-rules"
+          git -C "$RUNNER_TEMP/semgrep-rules" sparse-checkout init --cone
+          git -C "$RUNNER_TEMP/semgrep-rules" sparse-checkout set \
+            bash dockerfile go html javascript json python ruby rust terraform typescript yaml
+          git -C "$RUNNER_TEMP/semgrep-rules" fetch --depth 1 origin "$RULES_COMMIT"
+          git -C "$RUNNER_TEMP/semgrep-rules" checkout --detach "$RULES_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/semgrep-rules" rev-parse HEAD)" = "$RULES_COMMIT"
       - name: Scan with Semgrep Community Edition
         run: |
-          semgrep scan --metrics=off --disable-version-check \
-            --no-git-ignore \
-            --x-ignore-semgrepignore-files \
-            --exclude .semgrep-rules \
-            --config .semgrep-rules/bash \
-            --config .semgrep-rules/dockerfile \
-            --config .semgrep-rules/go \
-            --config .semgrep-rules/html \
-            --config .semgrep-rules/javascript \
-            --config .semgrep-rules/json \
-            --config .semgrep-rules/python \
-            --config .semgrep-rules/ruby \
-            --config .semgrep-rules/rust \
-            --config .semgrep-rules/terraform \
-            --config .semgrep-rules/typescript \
-            --config .semgrep-rules/yaml
+          docker run --rm --network none \
+            --entrypoint semgrep \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --volume "$RUNNER_TEMP/semgrep-rules:/rules:ro" \
+            --workdir /src \
+            "$SEMGREP_IMAGE" \
+            scan --metrics=off --disable-version-check \
+              --no-git-ignore \
+              --x-ignore-semgrepignore-files \
+              --config /rules/bash \
+              --config /rules/dockerfile \
+              --config /rules/go \
+              --config /rules/html \
+              --config /rules/javascript \
+              --config /rules/json \
+              --config /rules/python \
+              --config /rules/ruby \
+              --config /rules/rust \
+              --config /rules/terraform \
+              --config /rules/typescript \
+              --config /rules/yaml

@@ -10,7 +10,8 @@ Reusable, security-pinned GitHub Actions workflows for `vcolombo` public reposit
 - pins `actions/checkout` to a full commit SHA;
 - requires only `contents: read`;
 - uses no secrets or paid services;
-- checks out Semgrep community rules at an immutable commit SHA;
+- runs the scanner in a non-root, network-disabled container with read-only mounts, so self-hosted workspaces stay runner-owned;
+- fetches Semgrep community rules at an immutable commit into runner-temporary storage, never the persistent repository workspace;
 - keeps Semgrep metrics and version checks disabled;
 - prevents repository-controlled ignore files from suppressing tracked findings;
 - prevents checkout credentials from persisting into scan steps;
@@ -24,7 +25,7 @@ jobs:
     uses: vcolombo/github-workflows/.github/workflows/semgrep.yml@<full-commit-sha>
 ```
 
-Private repositories can avoid GitHub-hosted runner charges by selecting an existing **repository-scoped Linux x64** self-hosted runner:
+Private repositories can avoid GitHub-hosted runner charges by selecting an existing **repository-scoped Linux x64** self-hosted runner with Docker installed, running, and accessible to the runner account:
 
 ```yaml
 jobs:

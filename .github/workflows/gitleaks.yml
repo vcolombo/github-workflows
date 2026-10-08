@@ -1,7 +1,11 @@
 name: Gitleaks
 
-# Shared secret-leak scanner. Scans the full history so a secret committed
-# long ago is still caught.
+# Shared secret-leak scanner.
+#
+# Scan scope depends on the triggering event (the Gitleaks action picks the
+# range): pull_request and push scan the commits in range; schedule and
+# workflow_dispatch scan the full history. Pair PR callers with a weekly
+# scheduled run so secrets committed long ago are covered too.
 on:
   workflow_call:
   workflow_dispatch:

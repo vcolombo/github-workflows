@@ -18,6 +18,12 @@ on:
         type: boolean
         default: true
   workflow_dispatch:
+    inputs:
+      upload_sarif:
+        description: Upload SARIF results to GitHub code scanning.
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -106,7 +112,7 @@ jobs:
       - name: Summarize findings
         if: always()
         env:
-          UPLOAD_SARIF: ${{ inputs.upload_sarif != false }}
+          UPLOAD_SARIF: ${{ inputs.upload_sarif }}
         run: |
           python3 - "$RUNNER_TEMP/semgrep-out/semgrep.sarif" <<'PYEOF'
           import collections, json, os, sys
@@ -134,10 +140,9 @@ jobs:
               print(f"... and {len(actionable) - 25} more error/warning findings (see {where})")
           PYEOF
       - name: Upload SARIF to code scanning
-        # != false (rather than == true): workflow_dispatch runs have no
-        # inputs, so an == true check would silently skip their uploads
-        # despite the documented default of true.
-        if: always() && inputs.upload_sarif != false
+        # The input is declared with default true on both the workflow_call
+        # and workflow_dispatch triggers, so it is always defined here.
+        if: always() && inputs.upload_sarif
         uses: github/codeql-action/upload-sarif@d208ec71e39ae46397cbf6569bef8439b9aab974
         with:
           sarif_file: ${{ runner.temp }}/semgrep-out/semgrep.sarif

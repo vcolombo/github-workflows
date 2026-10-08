@@ -61,7 +61,9 @@ jobs:
           sha="${{ steps.pin.outputs.sha }}"
           sed -i -E "s/^([[:space:]]*RULES_COMMIT:[[:space:]]*).*/\1$sha/" .github/workflows/semgrep.yml
           grep -q "$sha" .github/workflows/semgrep.yml
-          branch="bump-semgrep-rules-$(date -u +%Y%m%d)"
+          # run_id suffix keeps retries safe: a date-only name collides when
+          # the workflow is re-run on the same day.
+          branch="bump-semgrep-rules-$(date -u +%Y%m%d)-${{ github.run_id }}"
           git checkout -b "$branch"
           git add .github/workflows/semgrep.yml
           git -c user.name='github-actions[bot]' \

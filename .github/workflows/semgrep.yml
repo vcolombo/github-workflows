@@ -8,6 +8,15 @@ on:
         required: false
         type: boolean
         default: false
+      upload_sarif:
+        description: >-
+          Upload SARIF results to GitHub code scanning. Requires the
+          security-events: write permission and code scanning enabled on the
+          caller repo (free for public repos; paid Advanced Security for
+          private ones). Set false for private repos without code scanning.
+        required: false
+        type: boolean
+        default: true
   workflow_dispatch:
 
 permissions:
@@ -23,11 +32,16 @@ jobs:
     if: ${{ !inputs.use_self_hosted || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
-    # NOTE: the SARIF upload needs security-events: write. Reusable workflows
-    # run with the *caller's* token permissions, so every caller must grant it:
+    # NOTE: the SARIF upload needs security-events: write, and code scanning
+    # must be enabled on the caller repo (free for public repos; paid
+    # Advanced Security for private ones). Reusable workflows run with the
+    # *caller's* token permissions, so every caller that leaves upload_sarif
+    # enabled must grant:
     #   permissions:
     #     contents: read
     #     security-events: write
+    # Callers without code scanning should pass upload_sarif: false and rely
+    # on the log summary step instead.
     permissions:
       contents: read
       security-events: write
@@ -115,7 +129,7 @@ jobs:
               print(f"... and {len(actionable) - 25} more error/warning findings (see the code-scanning alerts)")
           PYEOF
       - name: Upload SARIF to code scanning
-        if: always()
+        if: always() && inputs.upload_sarif
         uses: github/codeql-action/upload-sarif@d208ec71e39ae46397cbf6569bef8439b9aab974
         with:
           sarif_file: ${{ runner.temp }}/semgrep-out/semgrep.sarif

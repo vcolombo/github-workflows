@@ -105,9 +105,11 @@ jobs:
               --config /rules/yaml
       - name: Summarize findings
         if: always()
+        env:
+          UPLOAD_SARIF: ${{ inputs.upload_sarif != false }}
         run: |
           python3 - "$RUNNER_TEMP/semgrep-out/semgrep.sarif" <<'PYEOF'
-          import collections, json, sys
+          import collections, json, os, sys
           try:
               sarif = json.load(open(sys.argv[1]))
               runs = sarif.get("runs", [])
@@ -126,10 +128,16 @@ jobs:
               msg = (r.get("message") or {}).get("text", "").strip().splitlines()
               print(f"[{r.get('level')}] {uri}:{line} {r.get('ruleId')}: {msg[0] if msg else ''}"[:240])
           if len(actionable) > 25:
-              print(f"... and {len(actionable) - 25} more error/warning findings (see the code-scanning alerts)")
+              where = ("the code-scanning alerts"
+                       if os.environ.get("UPLOAD_SARIF") == "true"
+                       else "a full local re-run")
+              print(f"... and {len(actionable) - 25} more error/warning findings (see {where})")
           PYEOF
       - name: Upload SARIF to code scanning
-        if: always() && inputs.upload_sarif
+        # != false (rather than == true): workflow_dispatch runs have no
+        # inputs, so an == true check would silently skip their uploads
+        # despite the documented default of true.
+        if: always() && inputs.upload_sarif != false
         uses: github/codeql-action/upload-sarif@d208ec71e39ae46397cbf6569bef8439b9aab974
         with:
           sarif_file: ${{ runner.temp }}/semgrep-out/semgrep.sarif

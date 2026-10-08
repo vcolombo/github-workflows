@@ -29,8 +29,31 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "latest=$sha current=$current"
-      - name: Open bump PR
+      - name: Validate new rules commit
+        # Branches pushed with github.token do not trigger workflows, and
+        # callers pin this repo by SHA, so no CI would ever exercise the new
+        # rules. Validate the pin here instead: the commit must resolve and
+        # contain every rule dir the shared semgrep workflow consumes.
+        id: validate
         if: steps.pin.outputs.sha != steps.pin.outputs.current
+        run: |
+          set -euo pipefail
+          sha="${{ steps.pin.outputs.sha }}"
+          dir=$(mktemp -d "$RUNNER_TEMP/semgrep-rules-validate.XXXXXX")
+          git clone --filter=blob:none --no-checkout --depth 1 \
+            https://github.com/semgrep/semgrep-rules.git "$dir"
+          git -C "$dir" sparse-checkout init --cone
+          git -C "$dir" sparse-checkout set \
+            bash dockerfile go html javascript json php python ruby rust terraform typescript yaml
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach "$sha"
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          for d in bash dockerfile go html javascript json php python ruby rust terraform typescript yaml; do
+            test -d "$dir/$d" || { echo "missing rules dir: $d" >&2; exit 1; }
+          done
+          echo "rules pin $sha validated" >> "$GITHUB_STEP_SUMMARY"
+      - name: Open bump PR
+        if: steps.validate.conclusion == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -47,4 +70,4 @@ jobs:
           git push -u origin "$branch"
           gh pr create --base main --head "$branch" \
             --title "Bump Semgrep rules pin" \
-            --body "Monthly rules refresh: semgrep/semgrep-rules@$sha. Caller CI will exercise the new rules; merge if green."
+            --body "Monthly rules refresh: semgrep/semgrep-rules@$sha. The pin was smoke-validated in the bump run (commit resolves, all 13 consumed rule dirs present). Merge to roll it out to callers via the usual SHA-bump PRs."

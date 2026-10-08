@@ -1,0 +1,50 @@
+name: Bump Semgrep rules pin
+
+# The shared semgrep workflow pins its rules to a fixed semgrep-rules commit
+# for reproducibility. This opens a monthly PR moving the pin to the latest
+# commit on semgrep-rules main, so new rules keep flowing in.
+on:
+  schedule:
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Resolve latest semgrep-rules commit
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api repos/semgrep/semgrep-rules/commits/main --jq .sha)
+          current=$(grep -E '^[[:space:]]*RULES_COMMIT:' .github/workflows/semgrep.yml | awk '{print $2}')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$sha current=$current"
+      - name: Open bump PR
+        if: steps.pin.outputs.sha != steps.pin.outputs.current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="${{ steps.pin.outputs.sha }}"
+          sed -i -E "s/^([[:space:]]*RULES_COMMIT:[[:space:]]*).*/\1$sha/" .github/workflows/semgrep.yml
+          grep -q "$sha" .github/workflows/semgrep.yml
+          branch="bump-semgrep-rules-$(date -u +%Y%m%d)"
+          git checkout -b "$branch"
+          git add .github/workflows/semgrep.yml
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "Bump Semgrep rules pin to $sha"
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Bump Semgrep rules pin" \
+            --body "Monthly rules refresh: semgrep/semgrep-rules@$sha. Caller CI will exercise the new rules; merge if green."

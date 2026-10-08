@@ -23,6 +23,14 @@ jobs:
     if: ${{ !inputs.use_self_hosted || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
+    # NOTE: the SARIF upload needs security-events: write. Reusable workflows
+    # run with the *caller's* token permissions, so every caller must grant it:
+    #   permissions:
+    #     contents: read
+    #     security-events: write
+    permissions:
+      contents: read
+      security-events: write
     env:
       SEMGREP_IMAGE: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
       RULES_COMMIT: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
@@ -47,12 +55,13 @@ jobs:
             https://github.com/semgrep/semgrep-rules.git "$RULES_DIR"
           git -C "$RULES_DIR" sparse-checkout init --cone
           git -C "$RULES_DIR" sparse-checkout set \
-            bash dockerfile go html javascript json python ruby rust terraform typescript yaml
+            bash dockerfile go html javascript json php python ruby rust terraform typescript yaml
           git -C "$RULES_DIR" fetch --depth 1 origin "$RULES_COMMIT"
           git -C "$RULES_DIR" checkout --detach "$RULES_COMMIT"
           test "$(git -C "$RULES_DIR" rev-parse HEAD)" = "$RULES_COMMIT"
       - name: Scan with Semgrep Community Edition
         run: |
+          mkdir -p "$RUNNER_TEMP/semgrep-out"
           docker run --rm --network none \
             --entrypoint semgrep \
             --user "$(id -u):$(id -g)" \
@@ -60,20 +69,54 @@ jobs:
             --env PYTHONDONTWRITEBYTECODE=1 \
             --volume "$GITHUB_WORKSPACE:/src:ro" \
             --volume "$RULES_DIR:/rules:ro" \
+            --volume "$RUNNER_TEMP/semgrep-out:/out" \
             --workdir /src \
             "$SEMGREP_IMAGE" \
             scan --metrics=off --disable-version-check \
               --no-git-ignore \
               --x-ignore-semgrepignore-files \
+              --sarif --output /out/semgrep.sarif \
               --config /rules/bash \
               --config /rules/dockerfile \
               --config /rules/go \
               --config /rules/html \
               --config /rules/javascript \
               --config /rules/json \
+              --config /rules/php \
               --config /rules/python \
               --config /rules/ruby \
               --config /rules/rust \
               --config /rules/terraform \
               --config /rules/typescript \
               --config /rules/yaml
+      - name: Summarize findings
+        if: always()
+        run: |
+          python3 - "$RUNNER_TEMP/semgrep-out/semgrep.sarif" <<'PYEOF'
+          import collections, json, sys
+          try:
+              sarif = json.load(open(sys.argv[1]))
+              runs = sarif.get("runs", [])
+              results = runs[0].get("results", []) if runs else []
+          except Exception as e:
+              print(f"Could not parse SARIF: {e}")
+              sys.exit(0)
+          by_level = collections.Counter(r.get("level", "?") for r in results)
+          print(f"Semgrep findings: {len(results)} total"
+                + "".join(f", {lvl}={n}" for lvl, n in sorted(by_level.items())))
+          actionable = [r for r in results if r.get("level") in ("error", "warning")]
+          for r in actionable[:25]:
+              loc = (r.get("locations") or [{}])[0].get("physicalLocation", {}) or {}
+              uri = (loc.get("artifactLocation") or {}).get("uri", "?")
+              line = (loc.get("region") or {}).get("startLine", "?")
+              msg = (r.get("message") or {}).get("text", "").strip().splitlines()
+              print(f"[{r.get('level')}] {uri}:{line} {r.get('ruleId')}: {msg[0] if msg else ''}"[:240])
+          if len(actionable) > 25:
+              print(f"... and {len(actionable) - 25} more error/warning findings (see the code-scanning alerts)")
+          PYEOF
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@d208ec71e39ae46397cbf6569bef8439b9aab974
+        with:
+          sarif_file: ${{ runner.temp }}/semgrep-out/semgrep.sarif
+          category: semgrep-ce

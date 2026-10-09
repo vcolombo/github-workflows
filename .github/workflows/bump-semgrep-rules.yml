@@ -68,7 +68,9 @@ jobs:
           git fetch origin "$branch" 2>/dev/null || true
           if git rev-parse --verify --quiet "origin/$branch" >/dev/null; then
             git checkout "$branch"
-            git rebase origin/main 2>/dev/null || git rebase --abort || true
+            # Merge, never rebase: the later push must stay fast-forward,
+            # and set -e fails the job on a real conflict for human attention.
+            git merge --no-edit origin/main
           else
             git checkout -b "$branch"
           fi

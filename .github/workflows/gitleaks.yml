@@ -69,6 +69,7 @@ jobs:
         env:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
+          FIRST_ID: ${{ github.event.commits[0].id }}
         run: |
           set -euo pipefail
           zeros=0000000000000000000000000000000000000000
@@ -81,7 +82,18 @@ jobs:
             # a flagless invocation would drop along with merge coverage.
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
-            echo "new branch; supplemental ancestry scan required"
+            # When the pushed commits start at a root, the action's
+            # `<first>^..last` range is an invalid revision and its scan
+            # errors; skip it and let the supplemental scan own the push,
+            # otherwise the job fails without scanning anything.
+            first_parents=$(git log -1 --format=%p "$FIRST_ID" 2>/dev/null || true)
+            if [ -n "$FIRST_ID" ] && [ -z "$first_parents" ]; then
+              echo "skip_action=true" >> "$GITHUB_OUTPUT"
+              echo "new branch starts at root; supplemental ancestry scan required"
+            else
+              echo "skip_action=false" >> "$GITHUB_OUTPUT"
+              echo "new branch; supplemental ancestry scan required"
+            fi
           else
             # A force-pushed-away base is unresolvable in a fresh clone;
             # rev-list would abort the job before anything is scanned.
@@ -106,23 +118,42 @@ jobs:
             fi
           fi
       - name: Scan for leaked secrets
+        id: scan
+        if: steps.pushrange.outputs.skip_action != 'true'
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # Pin the scanner release explicitly (this is the action's default;
+          # explicit keeps it in lockstep with the supplemental install below).
+          GITLEAKS_VERSION: "8.24.3"
       - name: Scan beyond action coverage
         # The action scans first-parent, non-merge commits of its chosen
-        # range only. This reuses its installed gitleaks binary to scan the
-        # full event range with no exclusions, so merged side branches,
-        # commits past page/truncation caps, and pushed merge resolutions
-        # cannot slip through. Merge resolutions get --diff-merges=separate:
-        # git omits merge diffs by default, which would hide secrets
-        # introduced only in a resolution. A leak here fails the job with
-        # findings in the log. Only one determination step runs per event, so
-        # exactly one log_opts value is non-empty.
+        # range only. This scans the full event range with no exclusions
+        # using the action-installed binary when present, so merged side
+        # branches, commits past page/truncation caps, and pushed merge
+        # resolutions cannot slip through. Merge resolutions get
+        # --diff-merges=separate: git omits merge diffs by default, which
+        # would hide secrets introduced only in a resolution. A leak here
+        # fails the job with findings in the log. Only one determination
+        # step runs per event, so exactly one log_opts value is non-empty.
         if: >-
           github.event_name == 'pull_request' && steps.tail.outputs.needed == 'true' ||
           github.event_name == 'push' && steps.pushrange.outputs.needed == 'true'
         env:
           LOG_OPTS: ${{ steps.tail.outputs.log_opts }}${{ steps.pushrange.outputs.log_opts }}
+          GITLEAKS_VERSION: "8.24.3"
+          GITLEAKS_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
         run: |
+          set -euo pipefail
+          if ! command -v gitleaks >/dev/null 2>&1; then
+            # The action step was skipped (or its install failed), so no
+            # binary is on PATH. Install the pinned release with a checksum
+            # check. ubuntu-latest is x64 Linux; this job never runs elsewhere.
+            bin_dir=$(mktemp -d "$RUNNER_TEMP/gitleaks-bin.XXXXXX")
+            curl -fsSL -o "$bin_dir/gitleaks.tar.gz" \
+              "https://github.com/zricethezav/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            printf '%s  %s\n' "$GITLEAKS_SHA256" "$bin_dir/gitleaks.tar.gz" | sha256sum -c -
+            tar -xzf "$bin_dir/gitleaks.tar.gz" -C "$bin_dir" gitleaks
+            PATH="$bin_dir:$PATH"
+          fi
           gitleaks detect --redact --exit-code=2 --log-opts="$LOG_OPTS"

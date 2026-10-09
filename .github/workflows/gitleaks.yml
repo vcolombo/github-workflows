@@ -6,9 +6,10 @@ name: Gitleaks
 # range): pull_request and push scan the commits in range; schedule and
 # workflow_dispatch scan the full history. Pair PR callers with a weekly
 # scheduled run so secrets committed long ago are covered too. The pinned
-# action derives its PR range from a single, unpaginated API page and skips
-# merges, so PRs it cannot fully cover (longer than one page, or containing
-# merged side branches) get a supplemental full-range scan below.
+# action derives its PR range from a single, unpaginated API page and scans
+# pushes with --no-merges --first-parent, so ranges it cannot fully cover
+# (long PRs, merged side branches, pushed merges) get a supplemental scan
+# below that keeps merge diffs via --diff-merges=separate.
 on:
   workflow_call:
   workflow_dispatch:
@@ -53,24 +54,63 @@ jobs:
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
             echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "log_opts=--diff-merges=separate $BASE_SHA..$HEAD_SHA" >> "$GITHUB_OUTPUT"
             echo "PR has $total commits ($merges merges); supplemental full-range scan required"
           else
             echo "needed=false" >> "$GITHUB_OUTPUT"
             echo "PR has $total commits without merges; action covers all"
           fi
+      - name: Determine push range beyond action coverage
+        id: pushrange
+        # The pinned action scans pushes with --no-merges --first-parent, so
+        # a pushed merge whose secret exists only in the resolution is
+        # missed. Delimit from the event's before/after SHAs.
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          zeros=0000000000000000000000000000000000000000
+          if [ "$AFTER_SHA" = "$zeros" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "branch deleted; nothing to scan"
+          elif [ "$BEFORE_SHA" = "$zeros" ]; then
+            # New branch: no base to range from, so scan the pushed tip's
+            # full ancestry. A bare SHA keeps --diff-merges=separate, which
+            # a flagless invocation would drop along with merge coverage.
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
+            echo "new branch; supplemental ancestry scan required"
+          else
+            merges=$(git rev-list --count --min-parents=2 "$BEFORE_SHA..$AFTER_SHA")
+            if [ "$merges" -gt 0 ]; then
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $BEFORE_SHA..$AFTER_SHA" >> "$GITHUB_OUTPUT"
+              echo "push holds $merges merges; supplemental scan required"
+            else
+              echo "needed=false" >> "$GITHUB_OUTPUT"
+              echo "push holds no merges; action covers all"
+            fi
+          fi
       - name: Scan for leaked secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - name: Scan full PR range beyond action coverage
-        # The action scans first-parent, non-merge commits of the first API
-        # page only. This reuses its installed gitleaks binary to scan the
-        # entire PR range with no exclusions, so merged side branches and
-        # commits past page/truncation caps cannot slip through. Merge
-        # resolutions get --diff-merges=separate: git omits merge diffs by
-        # default, which would hide secrets introduced only in a resolution.
-        # A leak here fails the job with findings in the log.
-        if: github.event_name == 'pull_request' && steps.tail.outputs.needed == 'true'
+      - name: Scan beyond action coverage
+        # The action scans first-parent, non-merge commits of its chosen
+        # range only. This reuses its installed gitleaks binary to scan the
+        # full event range with no exclusions, so merged side branches,
+        # commits past page/truncation caps, and pushed merge resolutions
+        # cannot slip through. Merge resolutions get --diff-merges=separate:
+        # git omits merge diffs by default, which would hide secrets
+        # introduced only in a resolution. A leak here fails the job with
+        # findings in the log. Only one determination step runs per event, so
+        # exactly one log_opts value is non-empty.
+        if: >-
+          github.event_name == 'pull_request' && steps.tail.outputs.needed == 'true' ||
+          github.event_name == 'push' && steps.pushrange.outputs.needed == 'true'
+        env:
+          LOG_OPTS: ${{ steps.tail.outputs.log_opts }}${{ steps.pushrange.outputs.log_opts }}
         run: |
-          gitleaks detect --redact --exit-code=2 \
-            --log-opts="--diff-merges=separate ${{ steps.tail.outputs.base }}..${{ steps.tail.outputs.head }}"
+          gitleaks detect --redact --exit-code=2 --log-opts="$LOG_OPTS"

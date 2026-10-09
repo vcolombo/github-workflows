@@ -25,8 +25,15 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: read
+# NOTE: this workflow deliberately declares no `permissions:` block, neither
+# here nor on the job. The SARIF upload needs security-events: write, but a
+# reusable workflow cannot request permissions conditionally: declaring
+# security-events: write would force even read-only callers
+# (upload_sarif: false) to grant it, because permission validation is static
+# and ignores step/job `if:` conditions. Instead the job inherits the
+# caller's token permissions. Callers that leave upload_sarif enabled must
+# grant contents: read + security-events: write; callers that set
+# upload_sarif: false grant only contents: read.
 
 concurrency:
   group: semgrep-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
@@ -38,22 +45,13 @@ jobs:
     if: ${{ !inputs.use_self_hosted || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
-    # NOTE: the SARIF upload needs security-events: write, and code scanning
-    # must be enabled on the caller repo (free for public repos; paid
-    # Advanced Security for private ones). Reusable workflows run with the
-    # *caller's* token permissions, so every caller that leaves upload_sarif
-    # enabled must grant:
-    #   permissions:
-    #     contents: read
-    #     security-events: write
-    # Callers without code scanning should pass upload_sarif: false and rely
-    # on the log summary step instead.
-    permissions:
-      contents: read
-      security-events: write
+    # The SARIF upload step needs security-events: write on the caller token
+    # (inherited, see the note above), and code scanning must be enabled on
+    # the caller repo (free for public repos; paid Advanced Security for
+    # private ones). Callers without code scanning pass upload_sarif: false
+    # and rely on the log summary step instead.
     env:
       SEMGREP_IMAGE: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
-      RULES_COMMIT: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
     steps:
       - name: Repair legacy scanner-owned workspace permissions
         if: ${{ inputs.use_self_hosted }}
@@ -67,6 +65,37 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - name: Resolve rules pin from workflow definition
+        # The rules pin lives outside .github/workflows (the default
+        # GITHUB_TOKEN cannot push workflow files), so the scan reads it from
+        # the definition repo at the exact revision the caller pinned. The
+        # github context is caller-associated, but the job context identifies
+        # the workflow file defining this job, which for a reused workflow is
+        # the shared definition. The clone goes to runner-temporary storage:
+        # nothing under the scan root is added or removed, so caller files
+        # can never be hidden from, or deleted before, the scan.
+        env:
+          DEF_REPOSITORY: ${{ job.workflow_repository }}
+          DEF_SHA: ${{ job.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          def_dir=$(mktemp -d "$RUNNER_TEMP/shared-workflows.XXXXXX")
+          git clone --filter=blob:none --no-checkout \
+            "https://x-access-token:${GH_TOKEN}@github.com/${DEF_REPOSITORY}.git" \
+            "$def_dir"
+          git -C "$def_dir" sparse-checkout init --cone
+          git -C "$def_dir" sparse-checkout set .github
+          git -C "$def_dir" fetch --depth 1 origin "$DEF_SHA"
+          git -C "$def_dir" checkout --detach "$DEF_SHA"
+          test "$(git -C "$def_dir" rev-parse HEAD)" = "$DEF_SHA"
+          pin=$(tr -d '[:space:]' < "$def_dir/.github/semgrep-rules-commit.txt")
+          case "$pin" in
+            '' | *[!0-9a-f]*) echo "invalid rules pin: $pin" >&2; exit 1;;
+          esac
+          test "${#pin}" = 40 || { echo "invalid rules pin length: $pin" >&2; exit 1; }
+          echo "RULES_COMMIT=$pin" >> "$GITHUB_ENV"
+          echo "rules pin $pin"
       - name: Fetch pinned Semgrep community rules outside the workspace
         run: |
           RULES_DIR=$(mktemp -d "$RUNNER_TEMP/semgrep-rules.XXXXXX")

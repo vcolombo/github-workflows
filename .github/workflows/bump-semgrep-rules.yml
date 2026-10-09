@@ -1,8 +1,10 @@
 name: Bump Semgrep rules pin
 
 # The shared semgrep workflow pins its rules to a fixed semgrep-rules commit
-# for reproducibility. This opens a monthly PR moving the pin to the latest
-# commit on semgrep-rules main, so new rules keep flowing in.
+# for reproducibility. The pin lives in .github/semgrep-rules-commit.txt
+# (outside .github/workflows, which the default GITHUB_TOKEN cannot push to).
+# This opens a monthly PR moving the pin to the latest commit on
+# semgrep-rules main, so new rules keep flowing in.
 on:
   schedule:
     - cron: "0 9 1 * *"
@@ -27,7 +29,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           sha=$(gh api repos/semgrep/semgrep-rules/commits/main --jq .sha)
-          current=$(grep -E '^[[:space:]]*RULES_COMMIT:' .github/workflows/semgrep.yml | awk '{print $2}')
+          current=$(tr -d '[:space:]' < .github/semgrep-rules-commit.txt)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "latest=$sha current=$current"
@@ -74,9 +76,8 @@ jobs:
           else
             git checkout -b "$branch"
           fi
-          sed -i -E "s/^([[:space:]]*RULES_COMMIT:[[:space:]]*).*/\1$sha/" .github/workflows/semgrep.yml
-          grep -q "$sha" .github/workflows/semgrep.yml
-          git add .github/workflows/semgrep.yml
+          printf '%s\n' "$sha" > .github/semgrep-rules-commit.txt
+          git add .github/semgrep-rules-commit.txt
           if git diff --cached --quiet; then
             echo "pin already at $sha on $branch; nothing to commit"
           else

@@ -21,8 +21,13 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: gitleaks-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Every push run must execute: push scans cover only their own range, so
+  # a cancelled or replaced run loses its commits forever. Push runs get a
+  # unique group each; PR, schedule, and manual scans are full-range and
+  # idempotent, so they keep sharing a group and coalescing.
+  group: >-
+    gitleaks-${{ github.repository }}-${{ github.event_name == 'push' && format('push-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   gitleaks:

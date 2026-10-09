@@ -81,13 +81,26 @@ jobs:
         run: |
           set -euo pipefail
           def_dir=$(mktemp -d "$RUNNER_TEMP/shared-workflows.XXXXXX")
-          git clone --filter=blob:none --no-checkout \
-            "https://x-access-token:${GH_TOKEN}@github.com/${DEF_REPOSITORY}.git" \
-            "$def_dir"
+          # Authenticate without embedding the token in the remote URL (it
+          # would persist in the clone's git config) or in process arguments.
+          # The credential travels in an exported variable referenced by name
+          # via --config-env; only the variable name appears in argv.
+          # printf is a shell builtin, so encoding spawns no process.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          export GIT_DEF_AUTH="AUTHORIZATION: basic $auth"
+          auth_cfg="http.https://github.com/.extraheader"
+          git --config-env="$auth_cfg=GIT_DEF_AUTH" \
+            clone --filter=blob:none --no-checkout \
+            "https://github.com/${DEF_REPOSITORY}.git" "$def_dir"
           git -C "$def_dir" sparse-checkout init --cone
           git -C "$def_dir" sparse-checkout set .github
-          git -C "$def_dir" fetch --depth 1 origin "$DEF_SHA"
-          git -C "$def_dir" checkout --detach "$DEF_SHA"
+          git --config-env="$auth_cfg=GIT_DEF_AUTH" -C "$def_dir" \
+            fetch --depth 1 origin "$DEF_SHA"
+          # Checkout keeps the transient auth: a partial clone can lazily
+          # fetch missing blobs on checkout.
+          git --config-env="$auth_cfg=GIT_DEF_AUTH" -C "$def_dir" \
+            checkout --detach "$DEF_SHA"
           test "$(git -C "$def_dir" rev-parse HEAD)" = "$DEF_SHA"
           pin=$(tr -d '[:space:]' < "$def_dir/.github/semgrep-rules-commit.txt")
           case "$pin" in

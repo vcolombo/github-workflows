@@ -66,9 +66,11 @@ jobs:
         # The action scans first-parent, non-merge commits of the first API
         # page only. This reuses its installed gitleaks binary to scan the
         # entire PR range with no exclusions, so merged side branches and
-        # commits past page/truncation caps cannot slip through. A leak here
-        # fails the job with findings in the log.
+        # commits past page/truncation caps cannot slip through. Merge
+        # resolutions get --diff-merges=separate: git omits merge diffs by
+        # default, which would hide secrets introduced only in a resolution.
+        # A leak here fails the job with findings in the log.
         if: github.event_name == 'pull_request' && steps.tail.outputs.needed == 'true'
         run: |
           gitleaks detect --redact --exit-code=2 \
-            --log-opts="${{ steps.tail.outputs.base }}..${{ steps.tail.outputs.head }}"
+            --log-opts="--diff-merges=separate ${{ steps.tail.outputs.base }}..${{ steps.tail.outputs.head }}"

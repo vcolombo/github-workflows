@@ -76,24 +76,28 @@ jobs:
           if [ "$AFTER_SHA" = "$zeros" ]; then
             echo "needed=false" >> "$GITHUB_OUTPUT"
             echo "branch deleted; nothing to scan"
-          elif [ "$BEFORE_SHA" = "$zeros" ]; then
-            # New branch: no base to range from, so scan the pushed tip's
-            # full ancestry. A bare SHA keeps --diff-merges=separate, which
-            # a flagless invocation would drop along with merge coverage.
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
+          else
             # When the pushed commits start at a root, the action's
             # `<first>^..last` range is an invalid revision and its scan
-            # errors; skip it and let the supplemental scan own the push,
-            # otherwise the job fails without scanning anything.
+            # errors. This holds for new branches and for existing branches
+            # force-pushed to an unrelated root-starting history alike, so
+            # detect it before anything else: skip the action and let the
+            # supplemental scan own the push, otherwise the job fails
+            # without scanning anything.
             first_parents=$(git log -1 --format=%p "$FIRST_ID" 2>/dev/null || true)
             if [ -n "$FIRST_ID" ] && [ -z "$first_parents" ]; then
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
               echo "skip_action=true" >> "$GITHUB_OUTPUT"
-              echo "new branch starts at root; supplemental ancestry scan required"
-            else
+              echo "push starts at root; supplemental ancestry scan required"
+            elif [ "$BEFORE_SHA" = "$zeros" ]; then
+              # New branch: no base to range from, so scan the pushed tip's
+              # full ancestry. A bare SHA keeps --diff-merges=separate, which
+              # a flagless invocation would drop along with merge coverage.
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
               echo "skip_action=false" >> "$GITHUB_OUTPUT"
               echo "new branch; supplemental ancestry scan required"
-            fi
           else
             # A force-pushed-away base is unresolvable in a fresh clone;
             # rev-list would abort the job before anything is scanned.
@@ -115,6 +119,7 @@ jobs:
               echo "needed=true" >> "$GITHUB_OUTPUT"
               echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
               echo "push base $BEFORE_SHA not present; supplemental ancestry scan required"
+            fi
             fi
           fi
       - name: Determine full-history range beyond action coverage

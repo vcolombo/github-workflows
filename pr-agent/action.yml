@@ -33,6 +33,10 @@ inputs:
     description: Post automatic code suggestions
     required: false
     default: 'false'
+  pr-actions:
+    description: PR event actions that trigger the automatic tools (JSON array)
+    required: false
+    default: '["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]'
 
 runs:
   using: composite
@@ -47,3 +51,4 @@ runs:
         github_action_config.auto_review: ${{ inputs.auto-review }}
         github_action_config.auto_describe: ${{ inputs.auto-describe }}
         github_action_config.auto_improve: ${{ inputs.auto-improve }}
+        github_action_config.pr_actions: ${{ inputs.pr-actions }}

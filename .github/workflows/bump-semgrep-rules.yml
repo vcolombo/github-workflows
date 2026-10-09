@@ -67,7 +67,12 @@ jobs:
           # concurrent manual/scheduled runs all converge on the same
           # branch and PR instead of opening duplicates.
           branch="bump-semgrep-rules-$sha"
-          git fetch origin "$branch" 2>/dev/null || true
+          # The merge below creates a merge commit when main has advanced, so
+          # the bot identity must be configured before it: a fresh runner has
+          # no Git identity, and the merge would fail or be misattributed
+          # under set -e.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if git rev-parse --verify --quiet "origin/$branch" >/dev/null; then
             git checkout "$branch"
             # Merge, never rebase: the later push must stay fast-forward,
@@ -81,9 +86,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "pin already at $sha on $branch; nothing to commit"
           else
-            git -c user.name='github-actions[bot]' \
-                -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-                commit -m "Bump Semgrep rules pin to $sha"
+            git commit -m "Bump Semgrep rules pin to $sha"
           fi
           git push -u origin "$branch"
           existing=$(gh pr list --head "$branch" --base main --state open --json number --jq '.[0].number // empty')

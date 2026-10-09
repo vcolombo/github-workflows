@@ -12,6 +12,9 @@ on:
 
 permissions:
   contents: read
+  # The pinned action posts PR review comments by default
+  # (pulls-create-review-comment); callers inherit this requirement.
+  pull-requests: write
 
 concurrency:
   group: gitleaks-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}

@@ -1,0 +1,180 @@
+name: Gitleaks
+
+# Shared secret-leak scanner.
+#
+# Scan scope depends on the triggering event (the Gitleaks action picks the
+# range): pull_request and push scan the commits in range; schedule and
+# workflow_dispatch scan the full history. Pair PR callers with a weekly
+# scheduled run so secrets committed long ago are covered too. The pinned
+# action derives its PR range from a single, unpaginated API page and scans
+# pushes with --no-merges --first-parent, so ranges it cannot fully cover
+# (long PRs, merged side branches, pushed merges) get a supplemental scan
+# below that keeps merge diffs via --diff-merges=separate.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The pinned action posts PR review comments by default
+  # (pulls-create-review-comment); callers inherit this requirement.
+  pull-requests: write
+
+concurrency:
+  # Every push run must execute: push scans cover only their own range, so
+  # a cancelled or replaced run loses its commits forever. Push runs get a
+  # unique group each; PR, schedule, and manual scans are full-range and
+  # idempotent, so they keep sharing a group and coalescing.
+  group: >-
+    gitleaks-${{ github.repository }}-${{ github.event_name == 'push' && format('push-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Determine commits beyond the action's first page
+        id: tail
+        # The pinned action lists PR commits once without pagination and
+        # scans first..last-of-page, silently omitting later commits; the
+        # list endpoint itself caps at 250 commits, so it cannot delimit the
+        # remainder either. Count locally instead: the checkout holds the
+        # full history, and the event carries the exact base/head SHAs.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          total=$(git rev-list --count "$BASE_SHA..$HEAD_SHA")
+          merges=$(git rev-list --count --min-parents=2 "$BASE_SHA..$HEAD_SHA")
+          if [ "$total" -gt 30 ] || [ "$merges" -gt 0 ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+            echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "log_opts=--diff-merges=separate $BASE_SHA..$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "PR has $total commits ($merges merges); supplemental full-range scan required"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "PR has $total commits without merges; action covers all"
+          fi
+      - name: Determine push range beyond action coverage
+        id: pushrange
+        # The pinned action scans pushes with --no-merges --first-parent, so
+        # a pushed merge whose secret exists only in the resolution is
+        # missed. Delimit from the event's before/after SHAs.
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          FIRST_ID: ${{ github.event.commits[0].id }}
+        run: |
+          set -euo pipefail
+          zeros=0000000000000000000000000000000000000000
+          if [ "$AFTER_SHA" = "$zeros" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "branch deleted; nothing to scan"
+          else
+            # When the pushed commits start at a root, the action's
+            # `<first>^..last` range is an invalid revision and its scan
+            # errors. This holds for new branches and for existing branches
+            # force-pushed to an unrelated root-starting history alike, so
+            # detect it before anything else: skip the action and let the
+            # supplemental scan own the push, otherwise the job fails
+            # without scanning anything.
+            first_parents=$(git log -1 --format=%p "$FIRST_ID" 2>/dev/null || true)
+            if [ -n "$FIRST_ID" ] && [ -z "$first_parents" ]; then
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
+              echo "skip_action=true" >> "$GITHUB_OUTPUT"
+              echo "push starts at root; supplemental ancestry scan required"
+            elif [ "$BEFORE_SHA" = "$zeros" ]; then
+              # New branch: no base to range from, so scan the pushed tip's
+              # full ancestry. A bare SHA keeps --diff-merges=separate, which
+              # a flagless invocation would drop along with merge coverage.
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
+              echo "skip_action=false" >> "$GITHUB_OUTPUT"
+              echo "new branch; supplemental ancestry scan required"
+          else
+            # A force-pushed-away base is unresolvable in a fresh clone;
+            # rev-list would abort the job before anything is scanned.
+            # Fall back to the pushed tip's ancestry in that case.
+            if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+              # The action bounds its push range by the webhook commits array,
+              # which GitHub caps at 2048 entries, so longer pushes truncate.
+              total=$(git rev-list --count "$BEFORE_SHA..$AFTER_SHA")
+              merges=$(git rev-list --count --min-parents=2 "$BEFORE_SHA..$AFTER_SHA")
+              if [ "$total" -gt 2048 ] || [ "$merges" -gt 0 ]; then
+                echo "needed=true" >> "$GITHUB_OUTPUT"
+                echo "log_opts=--diff-merges=separate $BEFORE_SHA..$AFTER_SHA" >> "$GITHUB_OUTPUT"
+                echo "push holds $total commits ($merges merges); supplemental scan required"
+              else
+                echo "needed=false" >> "$GITHUB_OUTPUT"
+                echo "push holds $total commits without merges; action covers all"
+              fi
+            else
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
+              echo "push base $BEFORE_SHA not present; supplemental ancestry scan required"
+            fi
+            fi
+          fi
+      - name: Determine full-history range beyond action coverage
+        id: fullhistory
+        # With no log options the action scans `--full-history --all`,
+        # which still omits merge diffs. Cover them on schedule and
+        # manual runs, the advertised catch-up path for old secrets.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "log_opts=--diff-merges=separate --full-history --all" >> "$GITHUB_OUTPUT"
+      - name: Scan for leaked secrets
+        id: scan
+        if: steps.pushrange.outputs.skip_action != 'true'
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Pin the scanner release explicitly (this is the action's default;
+          # explicit keeps it in lockstep with the supplemental install below).
+          GITLEAKS_VERSION: "8.24.3"
+      - name: Scan beyond action coverage
+        # The action scans first-parent, non-merge commits of its chosen
+        # range only. This scans the full event range with no exclusions
+        # using the action-installed binary when present, so merged side
+        # branches, commits past page/truncation caps, and pushed merge
+        # resolutions cannot slip through. Merge resolutions get
+        # --diff-merges=separate: git omits merge diffs by default, which
+        # would hide secrets introduced only in a resolution. A leak here
+        # fails the job; findings print redacted (-v with --redact) so a
+        # failure names the file, commit, and rule. Only one determination
+        # step runs per event, so exactly one log_opts value is non-empty.
+        if: >-
+          github.event_name == 'pull_request' && steps.tail.outputs.needed == 'true' ||
+          github.event_name == 'push' && steps.pushrange.outputs.needed == 'true' ||
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.fullhistory.outputs.needed == 'true'
+        env:
+          LOG_OPTS: ${{ steps.tail.outputs.log_opts }}${{ steps.pushrange.outputs.log_opts }}${{ steps.fullhistory.outputs.log_opts }}
+          GITLEAKS_VERSION: "8.24.3"
+          GITLEAKS_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+        run: |
+          set -euo pipefail
+          if ! command -v gitleaks >/dev/null 2>&1; then
+            # The action step was skipped (or its install failed), so no
+            # binary is on PATH. Install the pinned release with a checksum
+            # check. ubuntu-latest is x64 Linux; this job never runs elsewhere.
+            bin_dir=$(mktemp -d "$RUNNER_TEMP/gitleaks-bin.XXXXXX")
+            curl -fsSL -o "$bin_dir/gitleaks.tar.gz" \
+              "https://github.com/zricethezav/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            printf '%s  %s\n' "$GITLEAKS_SHA256" "$bin_dir/gitleaks.tar.gz" | sha256sum -c -
+            tar -xzf "$bin_dir/gitleaks.tar.gz" -C "$bin_dir" gitleaks
+            PATH="$bin_dir:$PATH"
+          fi
+          gitleaks detect --redact -v --exit-code=2 --log-opts="$LOG_OPTS"

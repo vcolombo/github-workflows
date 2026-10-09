@@ -8,10 +8,32 @@ on:
         required: false
         type: boolean
         default: false
+      upload_sarif:
+        description: >-
+          Upload SARIF results to GitHub code scanning. Requires the
+          security-events: write permission and code scanning enabled on the
+          caller repo (free for public repos; paid Advanced Security for
+          private ones). Set false for private repos without code scanning.
+        required: false
+        type: boolean
+        default: true
   workflow_dispatch:
+    inputs:
+      upload_sarif:
+        description: Upload SARIF results to GitHub code scanning.
+        required: false
+        type: boolean
+        default: true
 
-permissions:
-  contents: read
+# NOTE: this workflow deliberately declares no `permissions:` block, neither
+# here nor on the job. The SARIF upload needs security-events: write, but a
+# reusable workflow cannot request permissions conditionally: declaring
+# security-events: write would force even read-only callers
+# (upload_sarif: false) to grant it, because permission validation is static
+# and ignores step/job `if:` conditions. Instead the job inherits the
+# caller's token permissions. Callers that leave upload_sarif enabled must
+# grant contents: read + security-events: write; callers that set
+# upload_sarif: false grant only contents: read.
 
 concurrency:
   group: semgrep-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
@@ -23,9 +45,13 @@ jobs:
     if: ${{ !inputs.use_self_hosted || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ fromJSON(inputs.use_self_hosted && '["self-hosted","Linux","X64"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
+    # The SARIF upload step needs security-events: write on the caller token
+    # (inherited, see the note above), and code scanning must be enabled on
+    # the caller repo (free for public repos; paid Advanced Security for
+    # private ones). Callers without code scanning pass upload_sarif: false
+    # and rely on the log summary step instead.
     env:
       SEMGREP_IMAGE: semgrep/semgrep@sha256:1623685c0f6388b0bc8d577a712bf92b88252aaa09d6d7e38943dafa10ed978c
-      RULES_COMMIT: 40b8c63f75dc7c22c8a77482d73bfb864b146f7e
     steps:
       - name: Repair legacy scanner-owned workspace permissions
         if: ${{ inputs.use_self_hosted }}
@@ -39,6 +65,50 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - name: Resolve rules pin from workflow definition
+        # The rules pin lives outside .github/workflows (the default
+        # GITHUB_TOKEN cannot push workflow files), so the scan reads it from
+        # the definition repo at the exact revision the caller pinned. The
+        # github context is caller-associated, but the job context identifies
+        # the workflow file defining this job, which for a reused workflow is
+        # the shared definition. The clone goes to runner-temporary storage:
+        # nothing under the scan root is added or removed, so caller files
+        # can never be hidden from, or deleted before, the scan.
+        env:
+          DEF_REPOSITORY: ${{ job.workflow_repository }}
+          DEF_SHA: ${{ job.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          def_dir=$(mktemp -d "$RUNNER_TEMP/shared-workflows.XXXXXX")
+          # Authenticate without embedding the token in the remote URL (it
+          # would persist in the clone's git config) or in process arguments.
+          # The credential travels in an exported variable referenced by name
+          # via --config-env; only the variable name appears in argv.
+          # printf is a shell builtin, so encoding spawns no process.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          export GIT_DEF_AUTH="AUTHORIZATION: basic $auth"
+          auth_cfg="http.https://github.com/.extraheader"
+          git --config-env="$auth_cfg=GIT_DEF_AUTH" \
+            clone --filter=blob:none --no-checkout \
+            "https://github.com/${DEF_REPOSITORY}.git" "$def_dir"
+          git -C "$def_dir" sparse-checkout init --cone
+          git -C "$def_dir" sparse-checkout set .github
+          git --config-env="$auth_cfg=GIT_DEF_AUTH" -C "$def_dir" \
+            fetch --depth 1 origin "$DEF_SHA"
+          # Checkout keeps the transient auth: a partial clone can lazily
+          # fetch missing blobs on checkout.
+          git --config-env="$auth_cfg=GIT_DEF_AUTH" -C "$def_dir" \
+            checkout --detach "$DEF_SHA"
+          test "$(git -C "$def_dir" rev-parse HEAD)" = "$DEF_SHA"
+          pin=$(tr -d '[:space:]' < "$def_dir/.github/semgrep-rules-commit.txt")
+          case "$pin" in
+            '' | *[!0-9a-f]*) echo "invalid rules pin: $pin" >&2; exit 1;;
+          esac
+          test "${#pin}" = 40 || { echo "invalid rules pin length: $pin" >&2; exit 1; }
+          echo "RULES_COMMIT=$pin" >> "$GITHUB_ENV"
+          echo "rules pin $pin"
       - name: Fetch pinned Semgrep community rules outside the workspace
         run: |
           RULES_DIR=$(mktemp -d "$RUNNER_TEMP/semgrep-rules.XXXXXX")
@@ -47,12 +117,13 @@ jobs:
             https://github.com/semgrep/semgrep-rules.git "$RULES_DIR"
           git -C "$RULES_DIR" sparse-checkout init --cone
           git -C "$RULES_DIR" sparse-checkout set \
-            bash dockerfile go html javascript json python ruby rust terraform typescript yaml
+            bash dockerfile go html javascript json php python ruby rust terraform typescript yaml
           git -C "$RULES_DIR" fetch --depth 1 origin "$RULES_COMMIT"
           git -C "$RULES_DIR" checkout --detach "$RULES_COMMIT"
           test "$(git -C "$RULES_DIR" rev-parse HEAD)" = "$RULES_COMMIT"
       - name: Scan with Semgrep Community Edition
         run: |
+          mkdir -p "$RUNNER_TEMP/semgrep-out"
           docker run --rm --network none \
             --entrypoint semgrep \
             --user "$(id -u):$(id -g)" \
@@ -60,20 +131,61 @@ jobs:
             --env PYTHONDONTWRITEBYTECODE=1 \
             --volume "$GITHUB_WORKSPACE:/src:ro" \
             --volume "$RULES_DIR:/rules:ro" \
+            --volume "$RUNNER_TEMP/semgrep-out:/out" \
             --workdir /src \
             "$SEMGREP_IMAGE" \
             scan --metrics=off --disable-version-check \
               --no-git-ignore \
               --x-ignore-semgrepignore-files \
+              --sarif --output /out/semgrep.sarif \
               --config /rules/bash \
               --config /rules/dockerfile \
               --config /rules/go \
               --config /rules/html \
               --config /rules/javascript \
               --config /rules/json \
+              --config /rules/php \
               --config /rules/python \
               --config /rules/ruby \
               --config /rules/rust \
               --config /rules/terraform \
               --config /rules/typescript \
               --config /rules/yaml
+      - name: Summarize findings
+        if: always()
+        env:
+          UPLOAD_SARIF: ${{ inputs.upload_sarif }}
+        run: |
+          python3 - "$RUNNER_TEMP/semgrep-out/semgrep.sarif" <<'PYEOF'
+          import collections, json, os, sys
+          try:
+              sarif = json.load(open(sys.argv[1]))
+              runs = sarif.get("runs", [])
+              results = runs[0].get("results", []) if runs else []
+          except Exception as e:
+              print(f"Could not parse SARIF: {e}")
+              sys.exit(0)
+          by_level = collections.Counter(r.get("level", "?") for r in results)
+          print(f"Semgrep findings: {len(results)} total"
+                + "".join(f", {lvl}={n}" for lvl, n in sorted(by_level.items())))
+          actionable = [r for r in results if r.get("level") in ("error", "warning")]
+          for r in actionable[:25]:
+              loc = (r.get("locations") or [{}])[0].get("physicalLocation", {}) or {}
+              uri = (loc.get("artifactLocation") or {}).get("uri", "?")
+              line = (loc.get("region") or {}).get("startLine", "?")
+              msg = (r.get("message") or {}).get("text", "").strip().splitlines()
+              print(f"[{r.get('level')}] {uri}:{line} {r.get('ruleId')}: {msg[0] if msg else ''}"[:240])
+          if len(actionable) > 25:
+              where = ("the code-scanning alerts"
+                       if os.environ.get("UPLOAD_SARIF") == "true"
+                       else "a full local re-run")
+              print(f"... and {len(actionable) - 25} more error/warning findings (see {where})")
+          PYEOF
+      - name: Upload SARIF to code scanning
+        # The input is declared with default true on both the workflow_call
+        # and workflow_dispatch triggers, so it is always defined here.
+        if: always() && inputs.upload_sarif
+        uses: github/codeql-action/upload-sarif@d208ec71e39ae46397cbf6569bef8439b9aab974
+        with:
+          sarif_file: ${{ runner.temp }}/semgrep-out/semgrep.sarif
+          category: semgrep-ce

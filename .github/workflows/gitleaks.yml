@@ -117,6 +117,15 @@ jobs:
               echo "push base $BEFORE_SHA not present; supplemental ancestry scan required"
             fi
           fi
+      - name: Determine full-history range beyond action coverage
+        id: fullhistory
+        # With no log options the action scans `--full-history --all`,
+        # which still omits merge diffs. Cover them on schedule and
+        # manual runs, the advertised catch-up path for old secrets.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "log_opts=--diff-merges=separate --full-history --all" >> "$GITHUB_OUTPUT"
       - name: Scan for leaked secrets
         id: scan
         if: steps.pushrange.outputs.skip_action != 'true'
@@ -134,13 +143,15 @@ jobs:
         # resolutions cannot slip through. Merge resolutions get
         # --diff-merges=separate: git omits merge diffs by default, which
         # would hide secrets introduced only in a resolution. A leak here
-        # fails the job with findings in the log. Only one determination
+        # fails the job; findings print redacted (-v with --redact) so a
+        # failure names the file, commit, and rule. Only one determination
         # step runs per event, so exactly one log_opts value is non-empty.
         if: >-
           github.event_name == 'pull_request' && steps.tail.outputs.needed == 'true' ||
-          github.event_name == 'push' && steps.pushrange.outputs.needed == 'true'
+          github.event_name == 'push' && steps.pushrange.outputs.needed == 'true' ||
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.fullhistory.outputs.needed == 'true'
         env:
-          LOG_OPTS: ${{ steps.tail.outputs.log_opts }}${{ steps.pushrange.outputs.log_opts }}
+          LOG_OPTS: ${{ steps.tail.outputs.log_opts }}${{ steps.pushrange.outputs.log_opts }}${{ steps.fullhistory.outputs.log_opts }}
           GITLEAKS_VERSION: "8.24.3"
           GITLEAKS_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
         run: |
@@ -156,4 +167,4 @@ jobs:
             tar -xzf "$bin_dir/gitleaks.tar.gz" -C "$bin_dir" gitleaks
             PATH="$bin_dir:$PATH"
           fi
-          gitleaks detect --redact --exit-code=2 --log-opts="$LOG_OPTS"
+          gitleaks detect --redact -v --exit-code=2 --log-opts="$LOG_OPTS"

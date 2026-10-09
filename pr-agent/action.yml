@@ -1,0 +1,49 @@
+name: PR-Agent via OpenRouter
+description: >
+  Run PR-Agent code reviews through OpenRouter, so one API key covers any
+  model. Model, key wiring, and the PR-Agent version pin live here once;
+  callers stay thin.
+
+  This is a composite action (not a reusable workflow) because PR-Agent's
+  action entrypoint only dispatches on real GitHub event names
+  (pull_request, issue_comment, ...). Inside a reusable workflow the event
+  name is "workflow_call", which PR-Agent silently ignores.
+
+inputs:
+  model:
+    description: LiteLLM model ID for reviews (e.g. openrouter/deepseek/deepseek-chat)
+    required: false
+    default: openrouter/deepseek/deepseek-chat
+  openrouter-api-key:
+    description: OpenRouter API key for the review model
+    required: true
+  github-token:
+    description: GitHub token used to post reviews
+    required: false
+    default: ${{ github.token }}
+  auto-review:
+    description: Post an automatic review on opened/synchronized PRs
+    required: false
+    default: 'true'
+  auto-describe:
+    description: Post an automatic PR description
+    required: false
+    default: 'false'
+  auto-improve:
+    description: Post automatic code suggestions
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: PR-Agent review
+      uses: the-pr-agent/pr-agent@1d01f24f455bb879c1d9c557ad7de3d72dcc7975 # v0.46.0
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        config.model: ${{ inputs.model }}
+        config.fallback_models: ${{ format('["{0}"]', inputs.model) }}
+        github_action_config.auto_review: ${{ inputs.auto-review }}
+        github_action_config.auto_describe: ${{ inputs.auto-describe }}
+        github_action_config.auto_improve: ${{ inputs.auto-improve }}

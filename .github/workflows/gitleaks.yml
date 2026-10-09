@@ -83,17 +83,26 @@ jobs:
             echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
             echo "new branch; supplemental ancestry scan required"
           else
-            # The action bounds its push range by the webhook commits array,
-            # which GitHub caps at 2048 entries, so longer pushes truncate.
-            total=$(git rev-list --count "$BEFORE_SHA..$AFTER_SHA")
-            merges=$(git rev-list --count --min-parents=2 "$BEFORE_SHA..$AFTER_SHA")
-            if [ "$total" -gt 2048 ] || [ "$merges" -gt 0 ]; then
-              echo "needed=true" >> "$GITHUB_OUTPUT"
-              echo "log_opts=--diff-merges=separate $BEFORE_SHA..$AFTER_SHA" >> "$GITHUB_OUTPUT"
-              echo "push holds $total commits ($merges merges); supplemental scan required"
+            # A force-pushed-away base is unresolvable in a fresh clone;
+            # rev-list would abort the job before anything is scanned.
+            # Fall back to the pushed tip's ancestry in that case.
+            if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+              # The action bounds its push range by the webhook commits array,
+              # which GitHub caps at 2048 entries, so longer pushes truncate.
+              total=$(git rev-list --count "$BEFORE_SHA..$AFTER_SHA")
+              merges=$(git rev-list --count --min-parents=2 "$BEFORE_SHA..$AFTER_SHA")
+              if [ "$total" -gt 2048 ] || [ "$merges" -gt 0 ]; then
+                echo "needed=true" >> "$GITHUB_OUTPUT"
+                echo "log_opts=--diff-merges=separate $BEFORE_SHA..$AFTER_SHA" >> "$GITHUB_OUTPUT"
+                echo "push holds $total commits ($merges merges); supplemental scan required"
+              else
+                echo "needed=false" >> "$GITHUB_OUTPUT"
+                echo "push holds $total commits without merges; action covers all"
+              fi
             else
-              echo "needed=false" >> "$GITHUB_OUTPUT"
-              echo "push holds $total commits without merges; action covers all"
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
+              echo "push base $BEFORE_SHA not present; supplemental ancestry scan required"
             fi
           fi
       - name: Scan for leaked secrets

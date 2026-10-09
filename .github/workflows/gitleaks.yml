@@ -83,14 +83,17 @@ jobs:
             echo "log_opts=--diff-merges=separate $AFTER_SHA" >> "$GITHUB_OUTPUT"
             echo "new branch; supplemental ancestry scan required"
           else
+            # The action bounds its push range by the webhook commits array,
+            # which GitHub caps at 2048 entries, so longer pushes truncate.
+            total=$(git rev-list --count "$BEFORE_SHA..$AFTER_SHA")
             merges=$(git rev-list --count --min-parents=2 "$BEFORE_SHA..$AFTER_SHA")
-            if [ "$merges" -gt 0 ]; then
+            if [ "$total" -gt 2048 ] || [ "$merges" -gt 0 ]; then
               echo "needed=true" >> "$GITHUB_OUTPUT"
               echo "log_opts=--diff-merges=separate $BEFORE_SHA..$AFTER_SHA" >> "$GITHUB_OUTPUT"
-              echo "push holds $merges merges; supplemental scan required"
+              echo "push holds $total commits ($merges merges); supplemental scan required"
             else
               echo "needed=false" >> "$GITHUB_OUTPUT"
-              echo "push holds no merges; action covers all"
+              echo "push holds $total commits without merges; action covers all"
             fi
           fi
       - name: Scan for leaked secrets

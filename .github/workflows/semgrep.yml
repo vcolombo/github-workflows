@@ -61,6 +61,12 @@ jobs:
             "$SEMGREP_IMAGE" -hR "$(id -u):$(id -g)" /workspace
           unexpected_owner=$(find "$GITHUB_WORKSPACE" ! -uid "$(id -u)" -print -quit)
           test -z "$unexpected_owner"
+      - name: Set up job-local git config to avoid host config overrides
+        run: |
+          GIT_CONFIG_DIR="$RUNNER_TEMP/gitconfig"
+          mkdir -p "$GIT_CONFIG_DIR"
+          touch "$GIT_CONFIG_DIR/.gitconfig"
+          echo "GIT_CONFIG_GLOBAL=$GIT_CONFIG_DIR/.gitconfig" >> "$GITHUB_ENV"
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
